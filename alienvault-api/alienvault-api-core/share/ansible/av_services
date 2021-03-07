@@ -1,0 +1,126 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+#
+# License:
+#
+#    Copyright (c) 2015 AlienVault
+#    All rights reserved.
+#
+#    This package is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; version 2 dated June, 1991.
+#    You may not use, modify or distribute this program under any other version
+#    of the GNU General Public License.
+#
+#    This package is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this package; if not, write to the Free Software
+#    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston,
+#    MA  02110-1301  USA
+#
+#
+# On Debian GNU/Linux systems, the complete text of the GNU General
+# Public License can be found in `/usr/share/common-licenses/GPL-2'.
+#
+# Otherwise you can read it here: http://www.gnu.org/licenses/gpl-2.0.txt
+
+VERSION = "0.0.1"
+DOCUMENTATION = """
+module: av_services
+short_description: Manage services
+description:
+    - This module (stop/start/restart)s a service in the target system
+version_added: "%s"
+options:
+    - order: the start or stop order
+    - services: list of of services to start/stop
+""" % VERSION
+EXAMPLES = """
+"""
+
+import os
+import os.path
+import subprocess as sub
+
+def run_command(command, silent_mode):
+    p = sub.Popen(command, stdout=sub.PIPE,stdin=sub.PIPE,stderr=sub.PIPE, shell=True)
+
+    output = ""
+    err = ""
+
+    if silent_mode:
+        (output, err) = p.communicate()
+
+    ## Wait for date to terminate. Get return returncode ##
+    p_status = p.wait()
+
+    return p_status, output, err
+
+
+def parse_service(service):
+    if service[0] == '^':
+        return False, False, service[1:]
+
+    if service[0] == '*':
+        return True, True, service[1:]
+
+    return True, False, service
+
+
+def manage_services(order, services):
+    """Start/Stop service"""
+    output = dict()
+    output['result'] = []
+    output['errors'] = []
+    try:
+        for service in services:
+            silent_mode, optional, service_name = parse_service(service)
+            path1 = "/etc/init.d/%s" % service_name
+            path2 = "/etc/system.d/%s" % service_name
+            if (os.path.exists(path1) or os.path.exists(path2))  and (os.access(path1, os.X_OK) or os.access(path2, os.X_OK)):
+                cmd = "service %s %s" % (service_name, order)
+
+                return_code, result, error = run_command(cmd, silent_mode)
+
+                if return_code != 0:
+                    output['result'].append("Warning - %s service %s" % (order, service_name))
+                else:
+                    output['result'].append("Command: %s" % cmd)
+            else:
+                if optional:
+                    output['result'].append("Unable to %s optional service %s " % (order, service_name))
+                else:
+                    output['errors'].append("Service: %s isn't accessible." % service_name)
+
+    except Exception as e:
+        return False, "manage_services: %s" % str(e)
+
+    return True, output
+
+
+def main():
+
+    module = AnsibleModule(
+        argument_spec=dict(
+            order=dict(required=True, choices=['start', 'stop', 'restart']),
+            services=dict(required=True, type='list')))
+
+    order = module.params.get('order')
+    services = module.params.get('services')
+    if services == ['']:
+        module.fail_json(msg="The list of services cannot be empty")
+
+    success, data = manage_services(order, services)
+
+    if not success:
+        module.fail_json(msg=data)
+
+    module.exit_json(changed=True, data=data)
+
+# this is magic, see lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()

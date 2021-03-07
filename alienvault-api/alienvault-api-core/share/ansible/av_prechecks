@@ -1,0 +1,207 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+#
+# License:
+#
+#    Copyright (c) 2003-2006 ossim.net
+#    Copyright (c) 2007-2013 AlienVault
+#    All rights reserved.
+#
+#    This package is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; version 2 dated June, 1991.
+#    You may not use, modify or distribute this program under any other version
+#    of the GNU General Public License.
+#
+#    This package is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this package; if not, write to the Free Software
+#    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston,
+#    MA  02110-1301  USA
+#
+#
+# On Debian GNU/Linux systems, the complete text of the GNU General
+# Public License can be found in `/usr/share/common-licenses/GPL-2'.
+#
+# Otherwise you can read it here: http://www.gnu.org/licenses/gpl-2.0.txt
+
+VERSION="0.0.2"
+DOCUMENTATION = """
+module: av_prechecks
+short_description: run different precheck settings
+description:
+    - This module uses the different tools & commands to check the integrity, validity and stability of the system
+version_added: "%s"
+""" % VERSION
+
+
+def main():
+
+    module = AnsibleModule(
+            argument_spec=dict(
+            existtable = dict(type='list', default=[]),
+            sizehd = dict(type='bool', default=False),
+            dbmigratedata = dict(type='bool', default=False),
+            dbenginetypecheck = dict(default=''),
+            dbchecks = dict(default='')))
+
+    existtable = module.params.get('existtable')
+
+    sizehd = module.params.get('sizehd')
+
+    dbenginetypecheck = module.params.get('dbenginetypecheck')
+
+    dbchecks_str_dict = module.params.get('dbchecks')
+    dbchecks_str_list = dbchecks_str_dict.split("|")
+    dbchecks = []
+
+    if dbchecks_str_list[0] != '':
+        for dbchecks_items in dbchecks_str_list:
+            tmp_list = dbchecks_items.split(",")
+            if len(tmp_list)==2:
+                dbchecks.append(tmp_list)
+            else:
+                module.fail_json(changed=False, msg="Malformed db check arguments...")
+
+    output = dict()
+
+    exception_error = "Error running the pre-check command %s ansible module. Error type: %s"
+
+    output['result'] = []
+    output['errors'] = []
+
+    def add_error(error_text):
+        output['errors'].append(error_text.replace('\n',''))
+
+    # if it is professional
+    cmd = 'dpkg -l alienvault-professional 2>/dev/null | grep -q \"^ii[[:blank:]]\+\" && echo \"true\" || echo \"false\"'
+    rc, out_is_professional, err = module.run_command (cmd)
+    out_is_professional = out_is_professional.replace('\n','')
+
+    # Base requirements
+    base_requirements = True
+
+    if len(existtable)>0:
+        db_info = dict()
+        db_info['checks'] = dict()
+        db_info['checks']['db_existtable'] = dict()
+        db_info['checks']['db_existtable']['summary'] = "Exists table to be migrated"
+        db_info['checks']['db_existtable']['description'] = "Checks if there tables to be migrated"
+        db_info['checks']['db_existtable']['severity'] = "Error"
+        db_info['checks']['db_existtable']['result'] = 'failed'
+
+        try:
+            for table_name in existtable:
+                cmd = 'echo \"select count(*) from information_schema.TABLES where TABLE_NAME = \'%s\'\" | ossim-db -N -s' % table_name
+                rc, out_exists_table, err = module.run_command (cmd)
+
+                if int(out_exists_table)==0:
+                    base_requirements = False
+                    output['errors'].append("Table %s not found." % table_name)
+
+            if len(output['errors']) == 0:
+                db_info['checks']['db_existtable']['result'] = "passed"
+
+
+        except Exception,e:
+            output['errors'].append(exception_error % (cmd, str(e)))
+
+        output['db_existtable']=db_info
+
+    if base_requirements:
+        # HDD check size
+        if sizehd:
+            hd_info = dict()
+            hd_info['checks'] = dict()
+            hd_info['checks']['hd_size_check'] = dict()
+            hd_info['checks']['hd_size_check']['summary'] = "The HD has enough storage size available"
+            hd_info['checks']['hd_size_check']['description'] = "Checks if the HD has enough storage size available"
+            hd_info['checks']['hd_size_check']['severity'] = "Error"
+            hd_info['checks']['hd_size_check']['result'] = 'failed'
+            try:
+                cmd = 'df -k /var/lib/mysql/| awk \'{print $4}\' | tail -1'
+                rc, out_hd_size, err = module.run_command (cmd)
+
+                #ensure 5% free space after migration
+                out_hd_size = int(out_hd_size) * 0.95
+
+                if out_is_professional=='true':
+                    cmd = 'echo \"select round(sum(bt_size_allocated)/1024) as size_allocated ' \
+                          'FROM information_schema.TokuDB_fractal_tree_info where table_name = \'extra_data_content_old\'\" | ossim-db | tail -n1'
+                    rc, out_inno_db_size, err = module.run_command (cmd)
+                else:
+                    cmd = 'echo \"select round(((data_length + index_length) / 1024)) ' \
+                          'from information_schema.TABLES where TABLE_NAME = \'extra_data_content_old\'\" | ossim-db | tail -n1'
+                    rc, out_inno_db_size, err = module.run_command (cmd)
+
+                #we want join two tables but we don´t know how this new one will weight. We are going to check if we have enough space for allocate one and a half of the big one
+                if int(out_hd_size)>int(out_inno_db_size) * 1.4:
+                    hd_info['checks']['hd_size_check']['result'] = "passed"
+                else:
+                    cmd = 'df -k /var/lib/mysql/| awk \'{print $1}\' | tail -1'
+                    rc, out_hd_volume_name, err = module.run_command (cmd)
+                    add_error("HD check size: There is not enough disk space to complete this operation. It needs at least " + out_inno_db_size + " kb available on " + out_hd_volume_name + ".")
+
+                output['hd_check']=hd_info
+            except Exception,e:
+                output['errors'].append(exception_error % (cmd, str(e)))
+
+        # DB engine type check
+        if dbenginetypecheck!='':
+            db_info = dict()
+            db_info['checks'] = dict()
+            db_info['checks']['db_engine_type_check'] = dict()
+            db_info['checks']['db_engine_type_check']['summary'] = "The database engine is correct"
+            db_info['checks']['db_engine_type_check']['description'] = "Checks if there database engine type is correct"
+            db_info['checks']['db_engine_type_check']['severity'] = "Error"
+            db_info['checks']['db_engine_type_check']['result'] = 'failed'
+            try:
+                cmd = 'echo \"SELECT ENGINE FROM INFORMATION_SCHEMA.ENGINES\"|ossim-db'
+                rc, out_engine_type_check, err = module.run_command (cmd)
+
+                if dbenginetypecheck in out_engine_type_check!='':
+                    db_info['checks']['db_engine_type_check']['result'] = "passed"
+                else:
+                    add_error("The AlienVault database upgrade has not been activated correctly.")
+
+                output['db_check']=db_info
+            except Exception,e:
+                output['errors'].append(exception_error % (cmd, str(e)))
+
+        # DB internal
+        if dbchecks:
+
+            for check_data in dbchecks:
+                try:
+                    cmd = '/usr/bin/alienvault-doctor -l %s -o ansible' % check_data[0]
+                    rc, out_status, err = module.run_command (cmd)
+
+                    if out_is_professional=='true':
+                        output[check_data[1]]=out_status
+                    else:
+                        db_info = dict()
+                        db_info['ossim-free'] = dict()
+                        db_info['ossim-free']['summary'] = "Database check"
+                        db_info['ossim-free']['description'] = "Checks if db is correct"
+                        db_info['ossim-free']['severity'] = "Error"
+                        db_info['ossim-free']['result'] = 'passed'
+                        output[check_data[1]]=db_info
+
+                except Exception,e:
+                    output['errors'].append(exception_error % (cmd, str(e)))
+    else:
+        output['errors'].append("Base requirements not met.")
+
+    module.exit_json (changed=True,
+                      data=output,
+                      err=err,
+                      rc=rc,
+                      cmd=cmd)
+
+# this is magic, see lib/ansible/module_common.py
+#<<INCLUDE_ANSIBLE_MODULE_COMMON>>
+main()
